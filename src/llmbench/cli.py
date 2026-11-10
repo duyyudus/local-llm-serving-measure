@@ -387,7 +387,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if state.error:
         status.print(f"[red]Stopped:[/] {state.error}")
 
-    render_table(console, config, state.results)
+    render_table(console, config, state.results, warnings=state.warnings)
 
     if state.warnings and not state.error:
         status.print(

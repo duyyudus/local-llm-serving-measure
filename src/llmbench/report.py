@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from statistics import median_low
 from typing import Any, Dict, List, Optional
 
 from rich import box
@@ -13,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .runner import LevelResult
+from .runner import LevelResult, ok_per_wave
 
 
 def _fmt_compact(value: Optional[float], decimals: int = 1) -> str:
@@ -28,15 +27,12 @@ def _fmt_compact(value: Optional[float], decimals: int = 1) -> str:
     return f"{value:.{decimals}f}"
 
 
-def _ok_per_wave(level: LevelResult) -> int:
-    values = [wave.ok for wave in level.waves]
-    return int(median_low(values)) if values else 0
-
-
 def render_table(
     console: Console,
     config: Dict[str, Any],
     levels: List[LevelResult],
+    *,
+    warnings: List[str],
 ) -> None:
     if not levels:
         console.print("[yellow]No levels completed.[/]")
@@ -66,7 +62,7 @@ def render_table(
         summary = level.summary
         users_label = str(level.concurrency)
         if summary.failed:
-            users_label = f"{level.concurrency} ({_ok_per_wave(level)} ok/wave)"
+            users_label = f"{level.concurrency} ({ok_per_wave(level.waves)} ok/wave)"
         row = [
             users_label,
             _fmt_compact(
@@ -98,17 +94,11 @@ def render_table(
         "per wave) when some requests failed.[/]"
     )
 
+    for warning in warnings:
+        console.print(f"[yellow]Warning:[/] {warning}")
+
     if has_errors:
         for level in levels:
-            if level.summary.failed and level.summary.ok:
-                ok_per_wave = _ok_per_wave(level)
-                streams = "stream" if ok_per_wave == 1 else "streams"
-                console.print(
-                    f"[yellow]Warning:[/] users={level.concurrency}: only "
-                    f"{level.summary.ok}/{level.summary.requests} requests "
-                    f"succeeded; median {ok_per_wave} ok/wave, so metrics "
-                    f"reflect about {ok_per_wave} concurrent {streams}."
-                )
             if level.summary.errors:
                 first_error = level.summary.errors[0].replace("\n", " ")[:240]
                 console.print(

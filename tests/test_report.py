@@ -5,7 +5,7 @@ from rich.console import Console
 
 from llmbench.client import RequestResult
 from llmbench.report import build_report, render_table
-from llmbench.runner import LevelResult, LevelSummary, Wave
+from llmbench.runner import LevelResult, LevelSummary, Wave, failure_warning
 
 
 def _request(completion_tokens, *, ok=True, usage_reported=True):
@@ -92,10 +92,15 @@ def _level(waves_requests):
     )
 
 
-def _render(levels):
+def _render(levels, warnings=None):
     buffer = io.StringIO()
     console = Console(file=buffer, no_color=True, width=200)
-    render_table(console, {"model": "model", "endpoint": "endpoint"}, levels)
+    render_table(
+        console,
+        {"model": "model", "endpoint": "endpoint"},
+        levels,
+        warnings=warnings or [],
+    )
     return buffer.getvalue()
 
 
@@ -120,9 +125,11 @@ def test_output_length_warning_uses_reported_usage():
 
 def test_partial_failure_row_is_marked():
     level = _level([[_request(128), _request(None, ok=False, usage_reported=False)]])
+    warning = failure_warning(level.concurrency, level.summary, level.waves)
 
-    output = _render([level])
+    output = _render([level], warnings=[warning])
 
+    assert "Warning:" in output
     assert "2 (1 ok/wave)" in output
     assert "only 1/2 requests succeeded" in output
     assert "median 1 ok/wave" in output
@@ -145,7 +152,9 @@ def test_partial_failure_label_uses_per_wave_successes():
         ]
     )
 
-    output = _render([level])
+    warning = failure_warning(level.concurrency, level.summary, level.waves)
+
+    output = _render([level], warnings=[warning])
 
     assert "3 (2 ok/wave)" in output
     assert "3 (4 ok)" not in output

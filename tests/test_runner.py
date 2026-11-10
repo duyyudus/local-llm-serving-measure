@@ -155,6 +155,30 @@ def test_partial_failure_warning_uses_per_wave_successes():
     assert "about 1 concurrent stream" in state.warnings[0]
 
 
+def test_all_failed_level_warns_without_zero_stream_wording():
+    async def run():
+        state = RunState()
+        await run_benchmark(
+            StubClient(fail_after=0),
+            StubBuilder(),
+            [2],
+            state=state,
+            waves=1,
+            warmup_waves=0,
+            max_tokens=2,
+            temperature=0.0,
+            seed=None,
+            continue_on_error=True,
+        )
+        return state
+
+    state = asyncio.run(run())
+
+    assert len(state.warnings) == 1
+    assert "users=2: all 2 requests failed" in state.warnings[0]
+    assert "0 concurrent" not in state.warnings[0]
+
+
 def test_warmup_failure_stops_without_adding_level():
     async def run():
         state = RunState()

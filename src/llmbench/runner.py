@@ -267,6 +267,27 @@ def _first_error(waves: List[Wave]) -> str:
     return "unknown error"
 
 
+def ok_per_wave(waves: List[Wave]) -> int:
+    """Median-low of per-wave ok counts; the conservative ok/wave figure."""
+    return int(median_low([wave.ok for wave in waves])) if waves else 0
+
+
+def failure_warning(concurrency: int, summary: LevelSummary, waves: List[Wave]) -> str:
+    """Single source for the failure warning shown and exported."""
+    if summary.ok == 0:
+        return (
+            f"users={concurrency}: all {summary.requests} requests failed; "
+            "no metrics for this level."
+        )
+    ok_wave = ok_per_wave(waves)
+    streams = "stream" if ok_wave == 1 else "streams"
+    return (
+        f"users={concurrency}: only {summary.ok}/{summary.requests} requests "
+        f"succeeded; median {ok_wave} ok/wave, so metrics reflect about "
+        f"{ok_wave} concurrent {streams}."
+    )
+
+
 async def run_benchmark(
     client: ChatClient,
     builder: PromptBuilder,
@@ -339,12 +360,6 @@ async def run_benchmark(
             return state
 
         if summary.failed:
-            ok_per_wave = int(median_low([wave.ok for wave in measured]))
-            streams = "stream" if ok_per_wave == 1 else "streams"
-            state.warnings.append(
-                f"users={level}: only {summary.ok}/{summary.requests} requests "
-                f"succeeded; median {ok_per_wave} ok/wave, so metrics reflect "
-                f"about {ok_per_wave} concurrent {streams}."
-            )
+            state.warnings.append(failure_warning(level, summary, measured))
 
     return state
