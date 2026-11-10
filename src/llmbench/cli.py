@@ -90,7 +90,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--warmup-waves",
         type=int,
         default=1,
-        help="Warmup waves per concurrency level.",
+        help="Warmup waves per concurrency level. Warmups always run as bursts.",
+    )
+    parser.add_argument(
+        "--pattern",
+        choices=("burst", "sustained"),
+        default="burst",
+        help=(
+            "Load pattern per measured wave: burst starts N requests "
+            "together and waits for the slowest; sustained keeps N requests "
+            "in flight for --duration seconds."
+        ),
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=30.0,
+        help="Target length of each sustained window in seconds.",
     )
     parser.add_argument(
         "--temperature",
@@ -227,6 +243,8 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         parser.error("--chat-overhead must be >= 0")
     if args.temperature < 0:
         parser.error("--temperature must be >= 0")
+    if args.duration <= 0:
+        parser.error("--duration must be > 0")
 
 
 async def _run(
@@ -280,10 +298,29 @@ async def _run(
     def on_wave(wave: Wave) -> None:
         if args.quiet:
             return
-        kind = "warmup" if wave.warmup else f"wave {wave.index + 1}/{args.waves}"
+        if wave.warmup:
+            kind = "warmup"
+        elif args.pattern == "sustained":
+            kind = f"window {wave.index + 1}/{args.waves}"
+        else:
+            kind = f"wave {wave.index + 1}/{args.waves}"
         status.print(
             f"[dim]users={wave.concurrency:<3} {kind:<12} "
             f"{wave.ok}/{len(wave.requests)} ok  wall={wave.wall_s:.2f}s[/]"
+        )
+
+    last_progress = [-1e9]
+
+    def on_request(concurrency: int, done: int, failed: int, elapsed: float) -> None:
+        if args.quiet:
+            return
+        now = time.perf_counter()
+        if now - last_progress[0] < 1.0:
+            return
+        last_progress[0] = now
+        status.print(
+            f"[dim]users={concurrency:<3} {done} done, {failed} failed, "
+            f"{elapsed:.1f}s[/]"
         )
 
     try:
@@ -298,7 +335,10 @@ async def _run(
             temperature=args.temperature,
             seed=args.seed,
             continue_on_error=args.continue_on_error,
+            pattern=args.pattern,
+            duration=args.duration,
             on_wave=on_wave,
+            on_request=on_request,
         )
     finally:
         if client.disabled_params:
@@ -329,9 +369,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not args.quiet:
         status.print(f"[bold]Benchmarking[/] {args.model} @ {endpoint}")
+        timing = f"waves={args.waves} warmup={args.warmup_waves}"
+        if args.pattern == "sustained":
+            timing += f" duration={args.duration:g}s"
         status.print(
-            f"[dim]levels={levels} waves={args.waves} "
-            f"warmup={args.warmup_waves} prompt_tokens={args.prompt_tokens} "
+            f"[dim]levels={levels} pattern={args.pattern} {timing} "
+            f"prompt_tokens={args.prompt_tokens} "
             f"max_tokens={args.max_tokens}[/]"
         )
         if max(levels) > args.max_parallel:
@@ -374,6 +417,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "max_tokens": args.max_tokens,
         "waves": args.waves,
         "warmup_waves": args.warmup_waves,
+        "pattern": args.pattern,
+        "duration_s": args.duration,
         "temperature": args.temperature,
         "seed": args.seed,
         "encoding": args.encoding,

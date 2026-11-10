@@ -177,3 +177,48 @@ def test_build_report_keeps_error_null_for_warnings():
 
     assert report["error"] is None
     assert report["warnings"] == ["users=3: only 2/3 requests succeeded"]
+
+
+def test_sustained_footnote_appears_only_when_configured():
+    level = _level([[_request(128)]])
+    burst_prefill_note = (
+        "time until the last request gets its first token"
+    )
+
+    burst = _render([level])
+    assert "sustained" not in burst
+    assert burst_prefill_note in " ".join(burst.split())
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, width=200)
+    render_table(
+        console,
+        {"model": "model", "endpoint": "endpoint", "pattern": "sustained"},
+        [level],
+        warnings=[],
+    )
+    collapsed = " ".join(buffer.getvalue().split())
+
+    assert "In sustained mode each wave is a window" in collapsed
+    # The burst-only definition of Prefill agg must not appear next to the
+    # sustained one — the footnote would then define the column twice.
+    assert burst_prefill_note not in collapsed
+
+
+def test_sustained_users_label_shows_failed_count():
+    level = _level(
+        [[_request(128), _request(None, ok=False, usage_reported=False)]]
+    )
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, width=200)
+    render_table(
+        console,
+        {"model": "model", "endpoint": "endpoint", "pattern": "sustained"},
+        [level],
+        warnings=[],
+    )
+
+    output = buffer.getvalue()
+    assert "2 (1 failed)" in output
+    assert "ok/wave" not in output

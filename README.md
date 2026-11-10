@@ -51,17 +51,72 @@ Pick explicit levels instead:
 uv run llm-bench -m my-model --levels 1,2,4,8 --waves 5 --warmup-waves 1
 ```
 
+## Load patterns
+
+`--pattern` chooses how each concurrency level generates load:
+
+- **burst** (default): each wave fires N requests at the same moment and ends
+  when the slowest request finishes. This is the classic benchmark shape and
+  the aggregate columns describe one synchronized batch. Because every wave
+  starts with a scheduling stampede and ends with a shrinking batch, decode
+  numbers can jitter between waves.
+- **sustained**: each measured wave is a time window of `--duration` seconds
+  (default 30) that keeps exactly N requests in flight. As soon as a request
+  finishes, a new one starts, so the server sees a steady stream instead of a
+  synchronized stampede. This is closer to real serving, and per-request
+  metrics are pooled across many requests, which gives steadier decode
+  numbers.
+
+Details that matter in sustained mode:
+
+- `--waves` counts windows. Three windows of 30 seconds per level is 90
+  seconds per level; use `--waves 1` or `--waves 2` for long sessions.
+- Slots start out of step: slot `i` waits `i × (estimated request time / N)`
+  before its first request. The estimate comes from the burst warmup waves
+  and is capped at `--duration / N`, which limits the ramp-up to under one
+  `--duration` (and so the wall-clock cost of a window to under two) even
+  when the warmup estimate is bad. With identical request shapes, a batching
+  server would otherwise relaunch every slot in lockstep — back-to-back
+  bursts. `--warmup-waves 0` leaves no estimate, so slots launch together.
+- The window clock starts when the last slot launches, so the staggered
+  ramp-up is not measured: a slow or cold first warmup can stretch the ramp
+  (and the wall-clock run time of the window) but does not dilute the rates.
+  Per-request medians likewise use only requests that started inside the
+  window, since ramp-up requests ran with fewer than N streams in flight.
+- Requests already running when the window ends are allowed to finish, but
+  they do not dilute the rates: `Prefill agg` and `Output agg` count only the
+  tokens produced inside the window (tokens outside it are prorated by each
+  request's token rate) and divide by the window length. `Req/s` counts
+  requests that completed inside the window.
+- Warmup waves always run as bursts, whatever the pattern; they exist to warm
+  the server, not to measure it.
+- Requests that fail do not refill the slot in a tight loop: after 3
+  consecutive failures a slot stops launching requests (with a short backoff
+  between failed attempts), and a warning reports how many streams stopped
+  early, since effective concurrency is then lower than requested.
+- The columns keep their meanings, with one shift: `Prefill agg` becomes
+  prompt tokens prefilled inside the window per window second (prompts are
+  prefilled continuously rather than in one synchronized batch), and
+  `Output agg` is tokens generated inside the window per window second. With
+  the drain tail prorated away, these are steady-state rates rather than
+  burst averages.
+
+```bash
+uv run llm-bench -m my-model --levels 4,8 --pattern sustained \
+  --duration 30 --waves 2 --json sustained.json
+```
+
 ## What the table means
 
 | Column | Meaning |
 | --- | --- |
-| `Users` | Number of requests fired simultaneously. Shows `(N ok/wave)` when some requests in that level failed; `N` is the median successful requests per wave, so the metrics reflect about that many concurrent streams. |
+| `Users` | Number of requests fired simultaneously (burst) or kept in flight (sustained). Shows `(N ok/wave)` when some requests in that level failed; `N` is the median successful requests per wave, so the metrics reflect about that many concurrent streams. In sustained mode it shows `(N failed)` instead, because completions per window say nothing about how many streams ran. |
 | `TTFT med` / `p90` | Time to first streamed token, in milliseconds. Includes connection, server queueing, prefill, and the first decode step. |
 | `Prefill med` | `prompt_tokens / TTFT` for each request, in tokens/sec. This is effective prefill speed, not pure GPU prefill rate. |
 | `Decode med` | `(completion_tokens - 1) / (last_token - first_token)` per request, in tokens/sec. The p10 slow-tail value is kept in the JSON export. |
-| `Prefill agg` | Total prompt tokens across the wave divided by the time until the last request receives its first token. This measures aggregate prefill throughput under load. |
-| `Output agg` | Total completion tokens across the wave divided by wave wall time. |
-| `Req/s` | Successful requests divided by wave wall time. |
+| `Prefill agg` | Total prompt tokens across the wave divided by the time until the last request receives its first token. This measures aggregate prefill throughput under load. In sustained mode: prompt tokens prefilled inside the window divided by the window length. |
+| `Output agg` | Total completion tokens across the wave divided by wave wall time. In sustained mode: tokens generated inside the window (the drain tail is prorated) divided by the window length. |
+| `Req/s` | Successful requests divided by wave wall time. In sustained mode: requests that completed inside the window divided by the window length. |
 | `Err` | Failed requests at that level; shown only when at least one request failed. Failed requests are excluded from the other statistics. |
 
 Aggregate columns are the median of the measured waves, which is more stable
@@ -78,8 +133,10 @@ contains the exact values.
 | `--prompt-tokens`, `-c` | `2048` | Target prompt tokens, including the chat template. `--max-context` remains as a deprecated alias. |
 | `--max-tokens`, `-n` | `128` | Output tokens requested per request. |
 | `--levels` | `1..max-parallel` | Explicit comma-separated levels. |
-| `--waves` | `3` | Measured waves per level. |
-| `--warmup-waves` | `1` | Warmup waves per level. Set `0` to disable. |
+| `--waves` | `3` | Measured waves per level. With `--pattern sustained`, this is the number of sustained windows per level. |
+| `--warmup-waves` | `1` | Warmup waves per level. Set `0` to disable. Warmups always run as bursts. |
+| `--pattern` | `burst` | Load pattern per measured wave: `burst` fires N requests together and waits for the slowest; `sustained` keeps N requests in flight. |
+| `--duration` | `30` | Target length of each sustained window, in seconds. Only used with `--pattern sustained`. |
 | `--temperature` | `0.0` | Sampling temperature. |
 | `--seed` | none | Optional sampling seed. |
 | `--timeout` | `600` | Per-request read timeout, seconds. |
@@ -132,9 +189,11 @@ contains the exact values.
 - **Partial results are kept.** If a level fails or the run is interrupted, the
   table and JSON still contain every level that completed, plus an `error`
   field explaining where the run stopped. If only some requests in a level
-  fail, the row is marked `(N ok/wave)`, the JSON records a warning, and the
-  exit code is `1`. A completed run keeps `error: null`; partial failures live
-  in `warnings`.
+  fail, the row is marked `(N ok/wave)` (or `(N failed)` in sustained mode),
+  the JSON records a warning, and the exit code is `1`. A completed run keeps
+  `error: null`; partial failures live in `warnings`. An interrupt discards
+  the entire level that was in progress — in burst mode too — so only fully
+  completed levels are kept.
 - **Run the same way twice.** Warm caches, GPU clocks, background load, and
   network noise all move the numbers. Treat small differences as noise.
 
@@ -155,7 +214,7 @@ does not mean the output is unusable; check `warnings` and the `Err` column.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "tool": "llm-bench",
   "version": "0.1.0",
   "started_at": "2026-11-10T12:00:00+00:00",
@@ -168,6 +227,8 @@ does not mean the output is unusable; check `warnings` and the `Err` column.
     "endpoint": "...",
     "model": "...",
     "levels": [1, 2, 4],
+    "pattern": "burst",
+    "duration_s": 30.0,
     "prompt_tokens": 2048
   },
   "levels": [
@@ -217,3 +278,6 @@ without re-running the benchmark.
 5. Run the benchmark twice and compare. The second run is usually cleaner.
 6. Record the exact model, quantization, server version, GPU, and command line
    alongside the JSON output.
+7. If burst decode numbers jitter between waves, switch to
+   `--pattern sustained --duration 30 --waves 1` and compare the `Output agg`
+   columns instead.

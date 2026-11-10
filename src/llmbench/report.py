@@ -62,7 +62,14 @@ def render_table(
         summary = level.summary
         users_label = str(level.concurrency)
         if summary.failed:
-            users_label = f"{level.concurrency} ({ok_per_wave(level.waves)} ok/wave)"
+            if config.get("pattern") == "sustained":
+                # Completions per window say nothing about concurrency, so
+                # show the failure count instead of ok/wave.
+                users_label = f"{level.concurrency} ({summary.failed} failed)"
+            else:
+                users_label = (
+                    f"{level.concurrency} ({ok_per_wave(level.waves)} ok/wave)"
+                )
         row = [
             users_label,
             _fmt_compact(
@@ -84,15 +91,35 @@ def render_table(
         table.add_row(*row)
 
     console.print(table)
-    console.print(
-        "[dim]TTFT in ms; token speeds in tok/s. TTFT includes connection, "
-        "queueing, prefill and the first token. Prefill med = prompt_tokens / "
-        "TTFT (includes queueing). Prefill agg = total prompt tokens / time "
-        "until the last request gets its first token. Decode = "
-        "(completion_tokens - 1) / (last_token - first_token). "
-        "Agg columns are per-wave medians. Users shows '(N ok/wave)' (median "
-        "per wave) when some requests failed.[/]"
+    if config.get("pattern") == "sustained":
+        agg_note = (
+            "In sustained mode each wave is a window that keeps N requests "
+            "in flight (--pattern sustained --duration S): Prefill agg and "
+            "Output agg count only tokens produced inside the window (the "
+            "drain tail after the deadline and the staggered ramp-up are "
+            "prorated) and divide by the window length. Per-request medians "
+            "use only requests that started inside the window. "
+        )
+        users_note = "Users shows '(N failed)' when some requests failed."
+    else:
+        agg_note = (
+            "Prefill agg = total prompt tokens / time until the last "
+            "request gets its first token. "
+        )
+        users_note = (
+            "Users shows '(N ok/wave)' (median per wave) when some requests "
+            "failed."
+        )
+    footnote = (
+        "TTFT in ms; token speeds in tok/s. TTFT includes connection, "
+        "queueing, prefill and the first token. Prefill med = prompt_tokens "
+        "/ TTFT (includes queueing). "
+        + agg_note
+        + "Decode = (completion_tokens - 1) / (last_token - first_token). "
+        "Agg columns are per-wave medians. "
+        + users_note
     )
+    console.print(f"[dim]{footnote}[/]")
 
     for warning in warnings:
         console.print(f"[yellow]Warning:[/] {warning}")
@@ -137,7 +164,7 @@ def build_report(
     interrupted: bool = False,
 ) -> Dict[str, Any]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "tool": "llm-bench",
         "version": __version__,
         "started_at": started_at.isoformat(),
